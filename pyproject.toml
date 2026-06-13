@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shobdohotao"
+version = "0.1.0"
+description = "Remove background noise from recordings — fully offline (Bangla/English desktop app)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11,<3.12"
+authors = [{ name = "ShobdoHotao contributors" }]
+dependencies = [
+    "PySide6==6.7.*",
+    "deepfilternet==0.5.6",
+    "imageio-ffmpeg>=0.5.1",
+    # DeepFilterNet 0.5.6 needs torch 2.0.1 + torchaudio 2.0.2 (installed from
+    # the CPU index via scripts/setup_windows.ps1, not PyPI).
+    "torch==2.0.1",
+    "torchaudio==2.0.2",
+    # Provides libsndfile so torchaudio has an audio I/O backend on Windows.
+    "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.5",
+    "pyinstaller>=6",
+]
+
+[project.scripts]
+shobdohotao = "shobdohotao.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B"]

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Test / tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# PyInstaller
+*.spec.bak
+
+# Bundled model weights (large; fetched/placed at build time)
+models/*
+!models/.gitkeep
+
+# OS / editor
+Thumbs.db
+.DS_Store
+*.log
