@@ -56,6 +56,17 @@ class OutputFormat(Enum):
         return self.value
 
 
+class MediaType(Enum):
+    """Whether a cleaned output is audio or video.
+
+    Used to route saved outputs into the right library folder
+    (Cleaned Files/Audio vs Cleaned Files/Video).
+    """
+
+    AUDIO = "audio"
+    VIDEO = "video"
+
+
 class JobState(Enum):
     """Lifecycle states for a single denoise job."""
 
@@ -94,6 +105,112 @@ class ErrorCode(Enum):
     LOW_DISK_SPACE = "low_disk_space"
     VIDEO_TOO_LONG = "video_too_long"
     CANCELLED = "cancelled"
+    # Library / storage (Stage 1)
+    INVALID_FILENAME = "invalid_filename"
+    OUTPUT_FOLDER_FAILED = "output_folder_failed"
+    SAVE_FAILED = "save_failed"
+    FILE_LOCKED = "file_locked"
+    CANNOT_OPEN = "cannot_open"
+    FILE_MISSING = "file_missing"
+
+
+class ProcessingStage(Enum):
+    """Fine-grained, user-facing pipeline stages for the processing view.
+
+    Richer than :class:`JobState`: splits the opaque "enhancing" job state into
+    LOADING_MODEL + DENOISING and names each step the way the UI presents it. The
+    string value is also the i18n key suffix (``stage.<value>``).
+    """
+
+    PREPARING = "preparing"
+    INSPECTING = "inspecting"
+    EXTRACTING_AUDIO = "extracting_audio"
+    CONVERTING = "converting"
+    LOADING_MODEL = "loading_model"
+    DENOISING = "denoising"
+    ENCODING = "encoding"
+    MUXING_VIDEO = "muxing_video"
+    FINALIZING = "finalizing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+# Ordered stepper sequences shown in the processing view (terminal
+# COMPLETED/FAILED/CANCELLED states are not steps).
+AUDIO_STAGE_SEQUENCE = (
+    ProcessingStage.PREPARING,
+    ProcessingStage.CONVERTING,
+    ProcessingStage.LOADING_MODEL,
+    ProcessingStage.DENOISING,
+    ProcessingStage.ENCODING,
+    ProcessingStage.FINALIZING,
+)
+VIDEO_STAGE_SEQUENCE = (
+    ProcessingStage.INSPECTING,
+    ProcessingStage.EXTRACTING_AUDIO,
+    ProcessingStage.LOADING_MODEL,
+    ProcessingStage.DENOISING,
+    ProcessingStage.MUXING_VIDEO,
+    ProcessingStage.FINALIZING,
+)
+
+
+def stage_sequence_for(media_type: MediaType) -> tuple[ProcessingStage, ...]:
+    return (
+        VIDEO_STAGE_SEQUENCE
+        if media_type is MediaType.VIDEO
+        else AUDIO_STAGE_SEQUENCE
+    )
+
+
+# Map the coarse JobState (emitted by services) to a ProcessingStage.
+# LOADING_MODEL/DENOISING are split by the backend, not derivable from JobState
+# alone, so ENHANCING maps to DENOISING here as the default.
+_JOBSTATE_TO_STAGE = {
+    JobState.VALIDATING: ProcessingStage.PREPARING,
+    JobState.INSPECTING: ProcessingStage.INSPECTING,
+    JobState.CONVERTING: ProcessingStage.CONVERTING,
+    JobState.EXTRACTING: ProcessingStage.EXTRACTING_AUDIO,
+    JobState.ENHANCING: ProcessingStage.DENOISING,
+    JobState.EXPORTING: ProcessingStage.ENCODING,
+    JobState.MUXING: ProcessingStage.MUXING_VIDEO,
+    JobState.DONE: ProcessingStage.COMPLETED,
+    JobState.FAILED: ProcessingStage.FAILED,
+    JobState.CANCELLED: ProcessingStage.CANCELLED,
+}
+
+
+def stage_for_jobstate(state: JobState) -> ProcessingStage | None:
+    return _JOBSTATE_TO_STAGE.get(state)
+
+
+class ActivityCode(Enum):
+    """Structured engine-log events. The UI maps each to an i18n template and
+    fills parameters, so the processing layer never emits pre-formatted prose
+    (keeps activity messages translatable). Value is the i18n key suffix
+    (``activity.<value>``).
+    """
+
+    INPUT_IDENTIFIED = "input_identified"
+    AUDIO_STREAM = "audio_stream"
+    EXTRACTING = "extracting"
+    CONVERTING = "converting"
+    MODEL_READY = "model_ready"
+    DENOISE_STARTED = "denoise_started"
+    # Narration of the DeepFilterNet3 enhancement pass — purely descriptive log
+    # detail so the user can see *how* the noise is being removed.
+    ANALYZING = "analyzing"
+    PROFILING_NOISE = "profiling_noise"
+    SEPARATING = "separating"
+    APPLYING_MASK = "applying_mask"
+    RECONSTRUCTING = "reconstructing"
+    VERIFYING = "verifying"
+    FFMPEG_PROGRESS = "ffmpeg_progress"
+    REBUILDING_VIDEO = "rebuilding_video"
+    ENCODING = "encoding"
+    SAVING = "saving"
+    DONE = "done"
 
 
 # Sample rate DeepFilterNet3 operates at internally. The pipeline converts every
@@ -306,3 +423,69 @@ class VideoJobResult:
     metadata: VideoMetadata | None = None
     cleaned_stream_index: int = 0
     warnings: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class MediaInfo:
+    """A unified, view-facing description of a selected input file.
+
+    Built from the probed audio/video metadata so the home-screen media card and
+    the processing header can show real details without depending on the
+    probe-specific shapes.
+    """
+
+    path: Path
+    media_type: MediaType
+    container: str = ""
+    size_bytes: int = 0
+    duration_seconds: float = 0.0
+    sample_rate: int = 0
+    channels: int = 0
+    width: int = 0
+    height: int = 0
+    audio_codec: str = ""
+    video_codec: str = ""
+
+    @classmethod
+    def from_audio(cls, meta: AudioMetadata) -> MediaInfo:
+        return cls(
+            path=meta.path,
+            media_type=MediaType.AUDIO,
+            container=meta.path.suffix.lstrip(".").lower(),
+            size_bytes=meta.size_bytes,
+            duration_seconds=meta.duration_seconds,
+            sample_rate=meta.sample_rate,
+            channels=meta.channels,
+            audio_codec=meta.codec,
+        )
+
+    @classmethod
+    def from_video(cls, meta: VideoMetadata) -> MediaInfo:
+        first_audio = meta.audio_streams[0] if meta.audio_streams else None
+        return cls(
+            path=meta.path,
+            media_type=MediaType.VIDEO,
+            container=meta.container,
+            size_bytes=meta.size_bytes,
+            duration_seconds=meta.duration_seconds,
+            sample_rate=first_audio.sample_rate if first_audio else 0,
+            channels=first_audio.channels if first_audio else 0,
+            width=meta.width,
+            height=meta.height,
+            audio_codec=first_audio.codec if first_audio else "",
+            video_codec=meta.video_codec,
+        )
+
+
+@dataclass(frozen=True)
+class ProcessingResult:
+    """View-facing result of a finished job, ready for the save/completion step.
+
+    Decouples the UI from the audio/video result shapes. ``staged_path`` is the
+    completed-but-unsaved output in the staging dir.
+    """
+
+    staged_path: Path
+    media_type: MediaType
+    original_name: str
+    duration_seconds: float | None = None

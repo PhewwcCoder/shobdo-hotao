@@ -1,18 +1,14 @@
-"""Main application window — presentation only (rule §4).
+"""Application shell: header + stacked Home/Processing/Completion views.
 
-This module imports Qt lazily so importing the package on a headless machine
-does not require PySide6. The window:
-- never builds an FFmpeg command or touches DeepFilterNet;
-- runs every job on a worker thread (never the main thread);
-- disables controls that could start a second job while one runs;
-- pulls every label from the i18n catalog (no hardcoded English).
-
-This is the MVP shell: it wires the Aero theme, the language toggle, the sound
-orb, and the Clean/Cancel flow. Deeper UX (queue, waveform) is Phase 2.
+Presentation only (no FFmpeg/DeepFilterNet here). Jobs run on a worker thread;
+a :class:`ProcessingPresenter` drives the processing view from real events; the
+shell owns file selection, the staging→name→save→completion flow, and view
+switching. Qt is imported lazily so the package still imports without PySide6.
 """
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -20,16 +16,17 @@ from ..config import Settings
 from ..domain import (
     SUPPORTED_VIDEO_CONTAINERS,
     DenoiseRequest,
-    JobState,
+    MediaInfo,
+    MediaType,
     ProcessingError,
     VideoDenoiseRequest,
 )
 from ..i18n import Language, Translator
+from ..platform import file_actions
 from ..services.pipeline import Pipeline
 from ..services.video_processing_service import VideoProcessingService
-from .theme.tokens import build_stylesheet
-from .widgets.sound_orb import OrbState, make_orb
-from .workers_glue import start_job, start_video_job  # thin helpers, see below
+from ..storage.app_paths import AppPaths
+from ..storage.storage_service import StorageService
 
 
 def create_app() -> tuple[Any, Any]:
@@ -42,16 +39,27 @@ def create_app() -> tuple[Any, Any]:
 
 
 def _build_main_window_class() -> Any:
-    from PySide6.QtCore import Qt, QThread  # type: ignore
     from PySide6.QtWidgets import (  # type: ignore
         QFileDialog,
-        QHBoxLayout,
         QInputDialog,
-        QLabel,
         QMainWindow,
-        QPushButton,
+        QMessageBox,
+        QStackedWidget,
         QVBoxLayout,
         QWidget,
+    )
+
+    from .controllers.processing_presenter import ProcessingPresenter
+    from .theme.tokens import build_stylesheet
+    from .views.completion_view import CompletionView
+    from .views.home_view import HomeView
+    from .views.processing_view import ProcessingView
+    from .widgets.app_header import AppHeader
+    from .workers_glue import run_worker_on_thread
+
+    open_filter = (
+        "Media (*.mp3 *.wav *.m4a *.flac *.ogg *.aac "
+        "*.mp4 *.mov *.mkv *.avi *.webm);;All files (*)"
     )
 
     class MainWindow(QMainWindow):
@@ -60,209 +68,346 @@ def _build_main_window_class() -> Any:
             self._settings = Settings()
             self._t = Translator(self._settings.language())
             self._pipeline = Pipeline()
+            self._paths = AppPaths()
+            self._storage = StorageService(self._paths)
+            try:
+                self._paths.create_required_dirs()
+            except OSError:
+                pass
+
             self._input_path: Path | None = None
-            self._thread: QThread | None = None
+            self._media_info: MediaInfo | None = None
+            self._video_meta: Any = None
+            self._active_media_type = MediaType.AUDIO
+            self._active_staging: Path | None = None
+            self._active_duration: float | None = None
+            self._thread: Any = None
             self._worker: Any = None
 
+            self.setWindowTitle(self._t.tr("app.title"))
+            self.setMinimumSize(900, 620)
             self.setStyleSheet(
                 build_stylesheet(
                     reduce_transparency=self._settings.reduce_transparency()
                 )
             )
             self._build_ui()
-            self._retranslate()
 
-        # --- UI construction -------------------------------------------
+        # --- construction ----------------------------------------------
         def _build_ui(self) -> None:
-            # Qt widget classes come from the enclosing closure scope.
+            # Qt classes + view classes come from the enclosing closure scope.
             central = QWidget()
             root = QVBoxLayout(central)
 
-            self._title = QLabel()
-            self._title.setObjectName("Title")
-            root.addWidget(self._title)
+            self._header = AppHeader(self._t)
+            self._header.home_requested.connect(self._go_home)
+            self._header.library_requested.connect(self._open_library)
+            self._header.language_toggled.connect(self._toggle_language)
+            root.addWidget(self._header)
 
-            self._orb = make_orb()
-            self._orb.set_reduce_motion(self._settings.reduce_motion())
-            root.addWidget(self._orb, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-            self._status = QLabel()
-            self._status.setObjectName("Muted")
-            root.addWidget(self._status, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-            controls = QHBoxLayout()
-            self._open_btn = QPushButton()
-            self._open_btn.clicked.connect(self._on_open)
-            self._clean_btn = QPushButton()
-            self._clean_btn.clicked.connect(self._on_clean)
-            self._clean_btn.setEnabled(False)
-            self._cancel_btn = QPushButton()
-            self._cancel_btn.clicked.connect(self._on_cancel)
-            self._cancel_btn.setEnabled(False)
-            self._lang_btn = QPushButton()
-            self._lang_btn.clicked.connect(self._on_toggle_language)
-            for b in (self._open_btn, self._clean_btn, self._cancel_btn,
-                      self._lang_btn):
-                controls.addWidget(b)
-            root.addLayout(controls)
-
+            self._stack = QStackedWidget()
+            self._home = HomeView(self._t)
+            self._processing = ProcessingView(self._t)
+            self._completion = CompletionView(self._t)
+            for v in (self._home, self._processing, self._completion):
+                self._stack.addWidget(v)
+            root.addWidget(self._stack, 1)
             self.setCentralWidget(central)
 
-        # --- i18n -------------------------------------------------------
-        def _retranslate(self) -> None:
-            t = self._t.tr
-            self.setWindowTitle(t("app.title"))
-            self._title.setText(t("app.title.native"))
-            self._open_btn.setText(t("action.open"))
-            self._clean_btn.setText(t("action.clean"))
-            self._cancel_btn.setText(t("action.cancel"))
-            self._lang_btn.setText("বাংলা | EN")
-            self._status.setText(t("status.idle"))
-            for b in (self._open_btn, self._clean_btn, self._cancel_btn):
-                b.setAccessibleName(b.text())
+            reduce_motion = self._settings.reduce_motion()
+            self._home.set_reduce_motion(reduce_motion)
+            self._processing.set_reduce_motion(reduce_motion)
 
-        def _on_toggle_language(self) -> None:
+            # Home signals.
+            self._home.open_requested.connect(self._choose_file)
+            self._home.replace_requested.connect(self._choose_file)
+            self._home.clean_requested.connect(self._start_job)
+            self._home.library_requested.connect(self._open_library)  # reuse
+            self._home.file_dropped.connect(lambda p: self._select_file(Path(p)))
+            # Reflect the persisted strength and save changes back to settings.
+            self._home.set_strength(self._settings.strength())
+            self._home.strength_changed.connect(self._settings.set_strength)
+
+            # Processing + presenter.
+            self._processing.cancel_requested.connect(self._cancel_job)
+            self._presenter = ProcessingPresenter(
+                self._processing, self._t,
+                on_finished=self._on_finished,
+                on_failed=self._on_failed,
+                on_cancelled=self._on_cancelled,
+            )
+
+            # Completion signals.
+            self._completion.open_requested.connect(self._completion_open)
+            self._completion.show_in_folder_requested.connect(self._completion_reveal)
+            self._completion.clean_another_requested.connect(self._clean_another)
+            self._completion.library_requested.connect(self._open_library)
+
+            self._go_home()
+
+        # --- navigation ------------------------------------------------
+        def _go_home(self) -> None:
+            """Header Home: return to the empty landing (ignored mid-job)."""
+            if self._thread is not None:
+                return  # don't navigate away while a job is running
+            self._input_path = None
+            self._media_info = None
+            self._home.show_empty()
+            self._stack.setCurrentWidget(self._home)
+
+        def _open_library(self) -> None:
+            # Stage 2 will replace this with an in-app library screen.
+            self._paths.cleaned_files_dir().mkdir(parents=True, exist_ok=True)
+            self._guard(lambda: file_actions.open_directory(
+                self._paths.cleaned_files_dir()))
+
+        def _toggle_language(self) -> None:
             new = Language.BN if self._t.language is Language.EN else Language.EN
             self._t.set_language(new)
             self._settings.set_language(new)
-            self._retranslate()
+            self.setWindowTitle(self._t.tr("app.title"))
+            self._header.retranslate(self._t)
+            self._home.retranslate(self._t)
+            self._processing.retranslate(self._t)
+            self._completion.retranslate(self._t)
+            self._presenter.set_translator(self._t)
 
-        # --- actions ----------------------------------------------------
-        def _on_open(self) -> None:
+        # --- file selection --------------------------------------------
+        def _choose_file(self) -> None:
             path, _ = QFileDialog.getOpenFileName(
-                self, self._t.tr("action.open"), "",
-                "Media (*.mp3 *.wav *.m4a *.flac *.ogg *.aac "
-                "*.mp4 *.mov *.mkv *.avi *.webm);;All files (*)",
+                self, self._t.tr("action.open"), "", open_filter
             )
             if path:
-                self._input_path = Path(path)
-                self._clean_btn.setEnabled(True)
+                self._select_file(Path(path))
 
         def _is_video(self, path: Path) -> bool:
             return path.suffix.lstrip(".").lower() in SUPPORTED_VIDEO_CONTAINERS
 
-        def _on_clean(self) -> None:
+        def _select_file(self, path: Path) -> None:
+            try:
+                if self._is_video(path):
+                    from ..media.probe import probe_video
+
+                    meta = probe_video(path)
+                    self._video_meta = meta
+                    info = MediaInfo.from_video(meta)
+                else:
+                    from ..services import media_probe
+
+                    meta = media_probe.probe(path)
+                    self._video_meta = None
+                    info = MediaInfo.from_audio(meta)
+            except ProcessingError as exc:
+                self._error_box(self._t.tr(f"error.{exc.code.value}"))
+                return
+            self._input_path = path
+            self._media_info = info
+            self._active_media_type = info.media_type
+            self._active_duration = info.duration_seconds or None
+            self._home.show_selected(info)
+            self._stack.setCurrentWidget(self._home)
+
+        # --- job start -------------------------------------------------
+        def _staging_dir(self) -> Path:
+            staging = self._paths.temp_dir() / f"job_{uuid.uuid4().hex[:8]}"
+            staging.mkdir(parents=True, exist_ok=True)
+            return staging
+
+        def _start_job(self) -> None:
             if self._input_path is None or self._thread is not None:
-                return  # double-start guard
-            if self._is_video(self._input_path):
+                return
+            if self._active_media_type is MediaType.VIDEO:
                 self._start_video_job(self._input_path)
             else:
                 self._start_audio_job(self._input_path)
 
+        def _begin_processing(self, worker: Any) -> None:
+            self._worker = worker
+            self._processing.configure(self._active_media_type,
+                                       self._input_path.name)
+            self._stack.setCurrentWidget(self._processing)
+            self._presenter.attach(worker)
+            worker.finished.connect(self._teardown_thread)
+            worker.failed.connect(self._teardown_thread)
+            worker.canceled.connect(self._teardown_thread)
+            self._presenter.start_timer()
+            self._thread = run_worker_on_thread(worker)
+
         def _start_audio_job(self, input_path: Path) -> None:
+            from ..workers.processing_worker import make_worker
+
+            staging = self._staging_dir()
+            self._active_staging = staging
             request = DenoiseRequest(
                 input_path=input_path,
-                output_dir=self._settings.output_dir(),
+                output_dir=staging,
                 output_format=self._settings.output_format(),
                 strength=self._settings.strength(),
             )
-            self._set_busy(True)
-            self._orb.set_state(OrbState.PROCESSING)
-            self._thread, self._worker = start_job(
-                request, self._pipeline,
-                on_progress=self._on_progress,
-                on_finished=self._on_finished,
-                on_failed=self._on_failed,
-                on_cancelled=self._on_cancelled,
-            )
+            self._begin_processing(make_worker(request, self._pipeline))
 
         def _start_video_job(self, input_path: Path) -> None:
-            # Probe on the main thread (fast) to offer a stream picker when the
-            # video has more than one audio track (functional requirement §3).
-            from ..media.probe import probe_video
+            from ..workers.video_worker import make_video_worker
 
-            try:
-                meta = probe_video(input_path)
-            except ProcessingError as exc:
-                self._on_failed(exc)
-                return
-
-            chosen = self._choose_audio_stream(meta)
-            if chosen is False:  # user cancelled the picker
-                return
-
+            chosen = self._choose_audio_stream(self._video_meta)
+            if chosen is False:
+                return  # user cancelled the picker
+            staging = self._staging_dir()
+            self._active_staging = staging
             request = VideoDenoiseRequest(
                 input_path=input_path,
-                output_dir=self._settings.output_dir(),
+                output_dir=staging,
                 strength=self._settings.strength(),
                 audio_stream_index=chosen,
             )
             service = VideoProcessingService()
-            self._set_busy(True)
-            self._orb.set_state(OrbState.PROCESSING)
-            self._thread, self._worker = start_video_job(
-                request, service,
-                on_progress=self._on_progress,
-                on_finished=self._on_finished,
-                on_failed=self._on_failed,
-                on_cancelled=self._on_cancelled,
-            )
+            self._begin_processing(make_video_worker(request, service))
 
         def _choose_audio_stream(self, meta: Any) -> Any:
-            """Return a stream index, None (auto/first), or False (cancelled)."""
-            if len(meta.audio_streams) <= 1:
+            if meta is None or len(meta.audio_streams) <= 1:
                 return None
             labels = [s.label() for s in meta.audio_streams]
             choice, ok = QInputDialog.getItem(
-                self,
-                self._t.tr("video.choose_audio.title"),
-                self._t.tr("video.choose_audio.prompt"),
-                labels,
-                0,
-                False,
+                self, self._t.tr("video.choose_audio.title"),
+                self._t.tr("video.choose_audio.prompt"), labels, 0, False,
             )
             if not ok:
                 return False
             return meta.audio_streams[labels.index(choice)].index
 
-        def _on_cancel(self) -> None:
+        def _cancel_job(self) -> None:
             if self._worker is not None:
                 self._worker.cancel()
 
-        # --- worker callbacks ------------------------------------------
-        def _on_progress(self, state: JobState, _fraction: float) -> None:
-            key = {
-                JobState.VALIDATING: "status.validating",
-                JobState.CONVERTING: "status.converting",
-                JobState.ENHANCING: "status.enhancing",
-                JobState.EXPORTING: "status.exporting",
-                JobState.INSPECTING: "status.inspecting",
-                JobState.EXTRACTING: "status.extracting",
-                JobState.MUXING: "status.muxing",
-            }.get(state)
-            if key:
-                self._status.setText(self._t.tr(key))
-
-        def _on_finished(self, _result: Any) -> None:
-            self._orb.set_state(OrbState.DONE)
-            self._status.setText(self._t.tr("status.done"))
-            self._teardown_thread()
-            self._set_busy(False)
+        # --- terminal outcomes (from presenter) ------------------------
+        def _on_finished(self, result: Any) -> None:
+            staged: Path = result.output_path
+            original = result.request.input_path.name
+            duration = self._active_duration
+            md = getattr(result, "input_metadata", None)
+            if duration is None and md is not None:
+                duration = md.duration_seconds or None
+            self._save_and_complete(staged, original, duration)
 
         def _on_failed(self, error: ProcessingError) -> None:
-            self._status.setText(self._t.tr(f"error.{error.code.value}"))
-            self._orb.set_state(OrbState.IDLE)
-            self._teardown_thread()
-            self._set_busy(False)
+            self._cleanup_staging()
+            self._show_error_recovery(error)
 
         def _on_cancelled(self) -> None:
-            self._status.setText(self._t.tr("status.cancelled"))
-            self._orb.set_state(OrbState.IDLE)
-            self._teardown_thread()
-            self._set_busy(False)
+            self._cleanup_staging()
+            self._back_to_selected()
 
-        # --- thread lifecycle ------------------------------------------
-        def _set_busy(self, busy: bool) -> None:
-            self._open_btn.setEnabled(not busy)
-            self._clean_btn.setEnabled(not busy and self._input_path is not None)
-            self._lang_btn.setEnabled(not busy)
-            self._cancel_btn.setEnabled(busy)
+        # --- save + completion -----------------------------------------
+        def _save_and_complete(self, staged: Path, original: str,
+                               duration: float | None) -> None:
+            from .dialogs.save_dialog import prompt_save_name
 
-        def _teardown_thread(self) -> None:
+            suggested = self._storage.suggested_stem(original)
+            destination = str(self._paths.library_for(self._active_media_type))
+            extension = staged.suffix.lstrip(".")
+            while True:
+                stem = prompt_save_name(
+                    self, self._t, suggested_stem=suggested, extension=extension,
+                    destination_dir=destination,
+                )
+                if stem is None:
+                    if self._confirm_discard():
+                        self._storage.discard(staged)
+                        self._cleanup_staging()
+                        self._back_to_selected()
+                        return
+                    continue
+                try:
+                    final = self._storage.save_cleaned(
+                        staged, stem, self._active_media_type
+                    )
+                except ProcessingError as exc:
+                    self._error_box(self._t.tr(f"error.{exc.code.value}"))
+                    continue
+                self._cleanup_staging()
+                self._completion.set_result(final, self._active_media_type, duration)
+                self._completion_path = final
+                self._stack.setCurrentWidget(self._completion)
+                return
+
+        def _completion_open(self) -> None:
+            if getattr(self, "_completion_path", None):
+                self._guard(lambda: file_actions.open_file(self._completion_path))
+
+        def _completion_reveal(self) -> None:
+            if getattr(self, "_completion_path", None):
+                self._guard(
+                    lambda: file_actions.reveal_in_file_manager(self._completion_path)
+                )
+
+        def _clean_another(self) -> None:
+            self._go_home()  # reset to the empty landing
+
+        def _back_to_selected(self) -> None:
+            if self._media_info is not None:
+                self._home.show_selected(self._media_info)
+            else:
+                self._home.show_empty()
+            self._stack.setCurrentWidget(self._home)
+
+        # --- error recovery --------------------------------------------
+        def _show_error_recovery(self, error: ProcessingError) -> None:
+            box = QMessageBox(self)
+            box.setWindowTitle(self._t.tr("app.title"))
+            box.setText(self._t.tr(f"error.{error.code.value}"))
+            retry = box.addButton(self._t.tr("action.try_again"),
+                                  QMessageBox.ButtonRole.AcceptRole)
+            another = box.addButton(self._t.tr("action.choose_another"),
+                                    QMessageBox.ButtonRole.ActionRole)
+            box.addButton(self._t.tr("action.view_log_folder"),
+                          QMessageBox.ButtonRole.HelpRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is retry:
+                self._back_to_selected()
+                self._start_job()
+            elif clicked is another:
+                self._clean_another()
+            else:
+                from ..services.logging_service import log_dir
+
+                log_dir().mkdir(parents=True, exist_ok=True)
+                self._guard(lambda: file_actions.open_directory(log_dir()))
+                self._back_to_selected()
+
+        def _confirm_discard(self) -> bool:
+            box = QMessageBox(self)
+            box.setWindowTitle(self._t.tr("save.discard.title"))
+            box.setText(self._t.tr("save.discard.body"))
+            discard = box.addButton(self._t.tr("save.discard.discard"),
+                                    QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton(self._t.tr("save.discard.keep"),
+                          QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            return box.clickedButton() is discard
+
+        # --- helpers ---------------------------------------------------
+        def _cleanup_staging(self) -> None:
+            if self._active_staging is not None:
+                import shutil
+
+                shutil.rmtree(self._active_staging, ignore_errors=True)
+                self._active_staging = None
+
+        def _teardown_thread(self, *_args: Any) -> None:
             if self._thread is not None:
                 self._thread.quit()
                 self._thread.wait()
             self._thread = None
             self._worker = None
+
+        def _error_box(self, message: str) -> None:
+            QMessageBox.warning(self, self._t.tr("app.title"), message)
+
+        def _guard(self, action) -> None:
+            try:
+                action()
+            except ProcessingError as exc:
+                self._error_box(self._t.tr(f"error.{exc.code.value}"))
 
     return MainWindow

@@ -18,16 +18,20 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..domain import (
+    ActivityCode,
     AudioMetadata,
     DenoiseRequest,
     ErrorCode,
     JobResult,
     JobState,
+    MediaInfo,
     ProcessingError,
+    ProcessingStage,
     derive_output_path,
 )
 from . import ffmpeg_service, media_probe
 from .denoise_backend import DenoiseBackend, get_backend
+from .events import NullObserver, ProcessingObserver
 
 # Reported progress is coarse and stage-based; exact percentages are not
 # meaningful for a single opaque enhancement pass.
@@ -49,6 +53,28 @@ def _not_cancelled() -> bool:
 
 def _free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
+
+
+def _make_enhance_stage_cb(obs: ProcessingObserver) -> Callable[[ProcessingStage], None]:
+    """Forward the backend's LOADING_MODEL/DENOISING split to the observer.
+
+    Shared by the audio and video orchestrators so they report the model-load →
+    denoise transition identically.
+    """
+
+    def _cb(stage: ProcessingStage) -> None:
+        obs.on_stage(stage)
+        if stage is ProcessingStage.DENOISING:
+            obs.on_activity(ActivityCode.MODEL_READY)
+            obs.on_activity(ActivityCode.DENOISE_STARTED)
+            # Narrate the enhancement pass so the user sees how the noise is
+            # actually removed (the pass itself is a single blocking call).
+            obs.on_activity(ActivityCode.ANALYZING)
+            obs.on_activity(ActivityCode.PROFILING_NOISE)
+            obs.on_activity(ActivityCode.SEPARATING)
+            obs.on_activity(ActivityCode.APPLYING_MASK)
+
+    return _cb
 
 
 class Pipeline:
@@ -82,15 +108,35 @@ class Pipeline:
         *,
         progress: ProgressFn = _noop_progress,
         cancelled: CancelledFn = _not_cancelled,
+        observer: ProcessingObserver | None = None,
     ) -> JobResult:
-        """Execute the job. Always cleans temp, even on error/cancel."""
+        """Execute the job. Always cleans temp, even on error/cancel.
+
+        ``observer`` (optional) receives rich stage/activity/media events for the
+        processing UI; the coarse ``progress`` callback is still emitted for
+        back-compat.
+        """
+        obs = observer or NullObserver()
         temp_dir: Path | None = None
         try:
             # 1. Validate input.
             progress(JobState.VALIDATING, 0.0)
+            obs.on_stage(ProcessingStage.PREPARING)
             if not self._exists_fn(request.input_path):
                 raise ProcessingError(ErrorCode.FILE_NOT_FOUND, str(request.input_path))
             metadata = self._probe_fn(request.input_path)
+            obs.on_media_info(MediaInfo.from_audio(metadata))
+            obs.on_activity(
+                ActivityCode.INPUT_IDENTIFIED,
+                kind=(metadata.path.suffix.lstrip(".").upper() or "audio"),
+            )
+            if metadata.sample_rate:
+                obs.on_activity(
+                    ActivityCode.AUDIO_STREAM,
+                    codec=metadata.codec or "audio",
+                    sample_rate=metadata.sample_rate,
+                    channels=metadata.channels,
+                )
             self._check_cancelled(cancelled)
 
             # Preflight: ensure output folder exists and has headroom.
@@ -109,6 +155,8 @@ class Pipeline:
 
             # 3. Convert to 48 kHz PCM WAV.
             progress(JobState.CONVERTING, 0.1)
+            obs.on_stage(ProcessingStage.CONVERTING)
+            obs.on_activity(ActivityCode.CONVERTING)
             self._run_fn(
                 ffmpeg_service.build_convert_to_wav_cmd(
                     self._ffmpeg(), request.input_path, wav_in
@@ -116,15 +164,21 @@ class Pipeline:
             )
             self._check_cancelled(cancelled)
 
-            # 4. Enhance.
+            # 4. Enhance (the backend splits LOADING_MODEL -> DENOISING).
             progress(JobState.ENHANCING, 0.4)
-            self._backend.enhance(wav_in, wav_out, request.strength)
+            self._backend.enhance(
+                wav_in, wav_out, request.strength,
+                on_stage=_make_enhance_stage_cb(obs),
+            )
             if not wav_out.exists():
                 raise ProcessingError(ErrorCode.ENHANCE_FAILED, "no enhanced wav")
+            obs.on_activity(ActivityCode.RECONSTRUCTING)
             self._check_cancelled(cancelled)
 
             # 5. Export to chosen format with a collision-safe name.
             progress(JobState.EXPORTING, 0.8)
+            obs.on_stage(ProcessingStage.ENCODING)
+            obs.on_activity(ActivityCode.ENCODING)
             output_path = derive_output_path(
                 request.input_path,
                 request.output_dir,
@@ -138,9 +192,11 @@ class Pipeline:
             )
 
             # 6. Verify output landed.
+            obs.on_activity(ActivityCode.VERIFYING)
             if not self._exists_fn(output_path):
                 raise ProcessingError(ErrorCode.OUTPUT_NOT_WRITTEN, str(output_path))
 
+            obs.on_activity(ActivityCode.DONE)
             progress(JobState.DONE, 1.0)
             warnings: list[str] = []
             if metadata.is_silentish:

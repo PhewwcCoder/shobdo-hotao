@@ -21,11 +21,26 @@ is cleaned and remuxed back. See [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md).
 
 ## Status
 
-Early scaffold (Phase 1). The architecture, pure-Python core, i18n catalogs
-(Bangla + English), and a placeholder Aero UI shell are in place with a passing
-test suite. The DeepFilterNet3 backend and Qt UI require the full dependency set
-(see below). See [`docs/AUDIT.md`](docs/AUDIT.md) for the current state and
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for layer boundaries.
+Working desktop app (audio + video) with a managed local library. Cleaned files
+are saved under your **Documents** folder:
+
+```
+Documents/ShobdoHotao/
+├── Cleaned Files/{Audio,Video}/   # your results
+├── Database/  Logs/  Temp/
+```
+
+During processing a dedicated **Processing view** shows a live pipeline stepper,
+a reactive signal visualizer, and a real engine log (genuine FFmpeg progress for
+video; honest elapsed/stage for AI denoising — no fake percentages). After
+processing you **name the file** (live Windows-safe validation), then a
+**completion screen** offers Play/Open, Show in Folder, and Clean Another. A
+**Cleaned Files** button opens your library. Everything stays offline.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for layer boundaries,
+[`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md) for behaviour, and
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next (in-app library screen,
+storage settings, installer).
 
 ## Requirements
 

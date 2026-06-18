@@ -1,71 +1,25 @@
-"""Thin glue: move a ProcessingWorker onto a QThread and wire its signals.
+"""Thin glue: move a worker QObject onto a QThread and start it.
 
-Kept separate from ``main_window`` so the window body stays focused on layout
-and so this Qt-threading boilerplate can be reviewed in isolation. Qt is
-imported lazily.
+Signal wiring (presenter + teardown) is done by the shell so this stays a
+single-responsibility helper. Qt is imported lazily.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
-from ..domain import DenoiseRequest, VideoDenoiseRequest
-from ..services.pipeline import Pipeline
-from ..services.video_processing_service import VideoProcessingService
-from ..workers.processing_worker import make_worker
-from ..workers.video_worker import make_video_worker
 
+def run_worker_on_thread(worker: Any) -> Any:
+    """Move ``worker`` to a fresh QThread, start it, and return the thread.
 
-def start_job(
-    request: DenoiseRequest,
-    pipeline: Pipeline,
-    *,
-    on_progress: Callable[..., None],
-    on_finished: Callable[..., None],
-    on_failed: Callable[..., None],
-    on_cancelled: Callable[..., None],
-) -> tuple[Any, Any]:
-    """Start the job on a worker thread. Returns (thread, worker).
-
-    The caller is responsible for tearing down the thread once a terminal
-    signal fires.
+    ``thread.started`` triggers ``worker.run``. The caller connects the worker's
+    terminal signals (finished/failed/canceled) and is responsible for quitting
+    the thread afterwards.
     """
     from PySide6.QtCore import QThread  # type: ignore
 
     thread = QThread()
-    worker = make_worker(request, pipeline)
     worker.moveToThread(thread)
-
     thread.started.connect(worker.run)
-    worker.progress.connect(on_progress)
-    worker.finished.connect(on_finished)
-    worker.failed.connect(on_failed)
-    worker.canceled.connect(on_cancelled)
     thread.start()
-    return thread, worker
-
-
-def start_video_job(
-    request: VideoDenoiseRequest,
-    service: VideoProcessingService,
-    *,
-    on_progress: Callable[..., None],
-    on_finished: Callable[..., None],
-    on_failed: Callable[..., None],
-    on_cancelled: Callable[..., None],
-) -> tuple[Any, Any]:
-    """Start a video denoise job on a worker thread. Returns (thread, worker)."""
-    from PySide6.QtCore import QThread  # type: ignore
-
-    thread = QThread()
-    worker = make_video_worker(request, service)
-    worker.moveToThread(thread)
-
-    thread.started.connect(worker.run)
-    worker.progress.connect(on_progress)
-    worker.finished.connect(on_finished)
-    worker.failed.connect(on_failed)
-    worker.canceled.connect(on_cancelled)
-    thread.start()
-    return thread, worker
+    return thread

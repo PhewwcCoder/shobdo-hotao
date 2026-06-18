@@ -49,7 +49,8 @@ def _make_test_video(path: Path, ffmpeg: str) -> bool:
 class CopyBackend:
     """Stand-in for DeepFilterNet: copies input WAV to output WAV."""
 
-    def enhance(self, wav_in: Path, wav_out: Path, strength: Strength) -> None:
+    def enhance(self, wav_in: Path, wav_out: Path, strength: Strength,
+                on_stage=None) -> None:
         shutil.copyfile(wav_in, wav_out)
 
 

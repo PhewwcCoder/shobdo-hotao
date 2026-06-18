@@ -70,3 +70,69 @@ Dict-based catalogs in `i18n/` (`en.py`, `bn.py`) with identical key sets.
 Chosen over Qt `.ts`/`.qm` to avoid a compile step in the offline build and to
 keep diffs reviewable. A parity test fails the build if Bangla is missing or has
 extra keys.
+
+## storage/ and platform/ (Stage 1 — local library)
+
+Filesystem and OS-integration logic live outside the Qt widgets so they are
+fully unit-tested:
+
+- **`storage/app_paths.AppPaths`** — resolves the library layout under the
+  user's Documents (`Documents/ShobdoHotao/{Cleaned Files/{Audio,Video},
+  Database, Logs, Temp}`) via `QStandardPaths` with a headless fallback. Accepts
+  an explicit `root` so tests use a temp dir.
+- **`storage/filename_validator`** — Windows-safe name rules (illegal chars,
+  reserved device names, trailing dot/space, length) + collision-safe
+  `name_2/_3` naming. Allows Unicode/Bengali.
+- **`storage/storage_service.StorageService`** — moves a completed *staged*
+  output into the right library folder; `discard()` cleans up on cancel.
+- **`platform/file_actions`** — `open_file` / `reveal_in_file_manager` /
+  `open_directory` with per-OS, unit-tested command builders (Windows
+  `explorer /select`).
+
+### Save flow (no silent saves)
+
+Processing writes into a per-job **staging dir** under `Temp/` (not the
+library). When the job finishes the window shows the **Save Cleaned File**
+dialog (`ui/dialogs/save_dialog`); on save, `StorageService` moves the file into
+the library with a collision-safe name; on cancel the staged file is discarded
+(no orphans). The **Completion view** then offers Play/Open · Show in Folder ·
+Clean Another · Go to Cleaned Files. The pipeline/services are unchanged — only
+the `output_dir` they're given (a staging dir) and the post-step differ.
+
+## UI shell + rich processing events (polish stage)
+
+The window is a **shell**: an `AppHeader` (title · Home · Cleaned Files ·
+language pill) over a `QStackedWidget` of three views in `ui/views/` —
+`home_view` (drop-zone ↔ `MediaCard`), `processing_view`, `completion_view`.
+
+Real, honest progress flows end-to-end:
+
+```
+service  --ProcessingObserver-->  worker (Qt signals)  -->  ProcessingPresenter  -->  ProcessingView
+   |  on_stage / on_progress / on_activity / on_media_info        (stage_changed, progress_changed,
+   |                                                               activity, media_info, finished…)
+```
+
+- **`domain.ProcessingStage` / `ActivityCode`** — fine-grained stages and
+  structured log events (UI formats them via `ui/activity_format`, so technical
+  messages stay translatable and free of temp paths).
+- **`services/events.ProcessingObserver`** — optional sink the services emit to
+  (additive; the old `progress(JobState,…)` callback is unchanged). The backend
+  reports the **LOADING_MODEL → DENOISING** split via an `on_stage` callback (no
+  algorithm change). `FfmpegRunner` parses `-progress pipe:1` for **genuine**
+  numeric progress on the video extract/mux stages.
+- **`ui/stepper_model`** — pure state model for the `PipelineStepper`
+  (Pending/Active/Completed/Failed/Cancelled); unit-tested without a display.
+- **`ui/controllers/processing_presenter`** — turns worker signals into view
+  updates and owns the elapsed-time timer (UI thread; the worker thread is busy
+  inside the blocking job).
+- **`ui/widgets/signal_visualizer`** — QPainter-only reactive orb (idle breathing
+  → processing rings/bars → done/failed/cancelled), 60 fps cap, pauses when
+  hidden, static under reduce-motion.
+
+### Genuine vs. indeterminate progress
+Genuine numeric: video **Extracting audio** + **Rebuilding video** (FFmpeg
+`out_time_us ÷ duration`). Indeterminate (by necessity): **Removing noise**
+(DeepFilterNet `enhance()` is one opaque call — chunking would change output
+quality), plus Preparing/Inspecting/Loading model/Saving. These show elapsed
+time + "Stage X of N", never a fabricated percentage.

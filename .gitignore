@@ -16,7 +16,9 @@ venv/
 htmlcov/
 
 # PyInstaller
+*.spec
 *.spec.bak
+installer/Output/
 
 # Bundled model weights (large; fetched/placed at build time)
 models/*

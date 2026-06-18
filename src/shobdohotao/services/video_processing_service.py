@@ -20,9 +20,12 @@ from pathlib import Path
 from ..domain import (
     DEFAULT_MAX_VIDEO_SECONDS,
     SUPPORTED_VIDEO_CONTAINERS,
+    ActivityCode,
     ErrorCode,
     JobState,
+    MediaInfo,
     ProcessingError,
+    ProcessingStage,
     VideoDenoiseRequest,
     VideoJobResult,
     VideoMetadata,
@@ -30,10 +33,12 @@ from ..domain import (
 )
 from ..media import probe as video_probe
 from ..media import video_extractor, video_muxer
-from ..media.ffmpeg_runner import FfmpegRunner
+from ..media.ffmpeg_runner import FfmpegRunner, ProgressCallback
 from . import ffmpeg_service
 from .denoise_backend import DenoiseBackend, get_backend
+from .events import NullObserver, ProcessingObserver
 from .logging_service import get_logger
+from .pipeline import _make_enhance_stage_cb
 
 ProgressFn = Callable[[JobState, float], None]
 
@@ -46,6 +51,20 @@ def _noop_progress(_state: JobState, _fraction: float) -> None:
 
 def _free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
+
+
+def _make_progress_cb(obs: ProcessingObserver) -> ProgressCallback:
+    """Forward FFmpeg (current, total) seconds to the observer, plus a periodic
+    activity line so the engine log shows real throughput."""
+    last = {"sec": -5}
+
+    def _cb(current: int, total: int) -> None:
+        obs.on_progress(current, total)
+        if current - last["sec"] >= 5:  # throttle log spam to ~every 5s
+            last["sec"] = current
+            obs.on_activity(ActivityCode.FFMPEG_PROGRESS, current=current, total=total)
+
+    return _cb
 
 
 class VideoProcessingService:
@@ -89,7 +108,9 @@ class VideoProcessingService:
         request: VideoDenoiseRequest,
         *,
         progress: ProgressFn = _noop_progress,
+        observer: ProcessingObserver | None = None,
     ) -> VideoJobResult:
+        obs = observer or NullObserver()
         temp_dir: Path | None = None
         try:
             container = request.container()
@@ -98,9 +119,17 @@ class VideoProcessingService:
 
             # 1. Inspect.
             progress(JobState.INSPECTING, 0.0)
+            obs.on_stage(ProcessingStage.INSPECTING)
             if not self._exists_fn(request.input_path):
                 raise ProcessingError(ErrorCode.FILE_NOT_FOUND, str(request.input_path))
             meta = self._probe_fn(request.input_path)
+            obs.on_media_info(MediaInfo.from_video(meta))
+            obs.on_activity(ActivityCode.INPUT_IDENTIFIED,
+                            kind=f"{container.upper()} video")
+            if meta.audio_streams:
+                a0 = meta.audio_streams[0]
+                obs.on_activity(ActivityCode.AUDIO_STREAM, codec=a0.codec or "audio",
+                                sample_rate=a0.sample_rate, channels=a0.channels)
 
             # 2. Validate: audio present, duration, disk.
             if not meta.has_audio:
@@ -123,23 +152,33 @@ class VideoProcessingService:
             wav_in = temp_dir / "audio_48k.wav"
             wav_out = temp_dir / "audio_48k_cleaned.wav"
 
-            # 4. Extract chosen audio stream.
+            # 4. Extract chosen audio stream (real FFmpeg progress).
             progress(JobState.EXTRACTING, 0.15)
+            obs.on_stage(ProcessingStage.EXTRACTING_AUDIO)
+            obs.on_activity(ActivityCode.EXTRACTING)
             self._runner.run(
                 video_extractor.build_extract_audio_cmd(
                     self._ffmpeg(), request.input_path, wav_in,
                     stream_index=stream_index,
-                )
+                ),
+                total_seconds=meta.duration_seconds,
+                on_progress=_make_progress_cb(obs),
             )
 
             # 5. Enhance via the shared DeepFilterNet backend.
             progress(JobState.ENHANCING, 0.4)
-            self._backend.enhance(wav_in, wav_out, request.strength)
+            self._backend.enhance(
+                wav_in, wav_out, request.strength,
+                on_stage=_make_enhance_stage_cb(obs),
+            )
             if not wav_out.exists():
                 raise ProcessingError(ErrorCode.ENHANCE_FAILED, "no enhanced wav")
+            obs.on_activity(ActivityCode.RECONSTRUCTING)
 
-            # 6. Mux cleaned audio with original video.
+            # 6. Mux cleaned audio with original video (real FFmpeg progress).
             progress(JobState.MUXING, 0.75)
+            obs.on_stage(ProcessingStage.MUXING_VIDEO)
+            obs.on_activity(ActivityCode.REBUILDING_VIDEO)
             output_path = derive_cleaned_path(
                 request.input_path, request.output_dir, container,
                 exists=self._exists_fn,
@@ -149,13 +188,17 @@ class VideoProcessingService:
                     self._ffmpeg(), request.input_path, wav_out, output_path,
                     container=container,
                     keep_subtitles=bool(meta.subtitle_streams),
-                )
+                ),
+                total_seconds=meta.duration_seconds,
+                on_progress=_make_progress_cb(obs),
             )
 
             # 7. Verify.
+            obs.on_activity(ActivityCode.VERIFYING)
             if not self._exists_fn(output_path):
                 raise ProcessingError(ErrorCode.OUTPUT_NOT_WRITTEN, str(output_path))
 
+            obs.on_activity(ActivityCode.DONE)
             progress(JobState.DONE, 1.0)
             return VideoJobResult(
                 request=request,

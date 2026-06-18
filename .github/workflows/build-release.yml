@@ -1,0 +1,70 @@
+name: Build Windows installer
+
+# Push a version tag (e.g. v0.1.0) to build the installer and publish a Release.
+# Or run manually (Actions tab -> Run workflow) to get the installer as an
+# artifact without creating a Release.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create the GitHub Release and upload the asset
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Derive version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and "${{ github.ref_name }}" -match '^v(.+)$') {
+            $v = $Matches[1]
+          } else {
+            $v = "0.0.0-dev"
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Building version $v"
+
+      - name: Set up environment (CPU torch + deps)
+        shell: pwsh
+        run: .\scripts\setup_windows.ps1
+
+      - name: Build app bundle (PyInstaller)
+        shell: pwsh
+        run: .\scripts\build_windows.ps1
+
+      - name: Compile installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" installer\shobdohotao.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed ($LASTEXITCODE)" }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShobdoHotao-Setup
+          path: installer/Output/ShobdoHotao-Setup.exe
+          if-no-files-found: error
+
+      - name: Publish Release (tags only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/Output/ShobdoHotao-Setup.exe
+          generate_release_notes: true

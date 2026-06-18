@@ -19,6 +19,7 @@ from shobdohotao.domain import (
     ErrorCode,
     JobState,
     ProcessingError,
+    ProcessingStage,
     Strength,
     VideoDenoiseRequest,
     VideoMetadata,
@@ -31,7 +32,11 @@ class FakeBackend:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
 
-    def enhance(self, wav_in: Path, wav_out: Path, strength: Strength) -> None:
+    def enhance(self, wav_in: Path, wav_out: Path, strength: Strength,
+                on_stage=None) -> None:
+        if on_stage is not None:
+            on_stage(ProcessingStage.LOADING_MODEL)
+            on_stage(ProcessingStage.DENOISING)
         if self.fail:
             raise ProcessingError(ErrorCode.ENHANCE_FAILED, "fake")
         shutil.copyfile(wav_in, wav_out)
@@ -44,10 +49,13 @@ class FakeRunner:
         self.calls: list[list[str]] = []
         self._cancel_on = cancel_on_call
 
-    def run(self, cmd: list[str], *, timeout: float | None = None) -> None:
+    def run(self, cmd: list[str], *, timeout: float | None = None,
+            total_seconds: float | None = None, on_progress=None) -> None:
         self.calls.append(cmd)
         if self._cancel_on is not None and len(self.calls) >= self._cancel_on:
             raise ProcessingError(ErrorCode.CANCELLED, "user cancelled")
+        if on_progress is not None and total_seconds:
+            on_progress(int(total_seconds), int(total_seconds))
         Path(cmd[-1]).write_bytes(b"FAKEMEDIA")
 
     def cancel(self) -> None:
@@ -87,6 +95,30 @@ def _service(runner, *, backend=None, meta_fn=None, free=10**12, max_dur=10**9):
         free_bytes_fn=lambda p: free,
         max_duration_seconds=max_dur,
     )
+
+
+def test_observer_receives_stages_media_and_progress(tmp_path: Path) -> None:
+    from shobdohotao.domain import ActivityCode
+    from shobdohotao.services.events import RecordingObserver
+
+    obs = RecordingObserver()
+    runner = FakeRunner()
+    svc = _service(runner)
+    svc.run(_request(tmp_path), observer=obs)
+
+    # Stage transitions include the model-load -> denoise split and mux.
+    assert ProcessingStage.INSPECTING in obs.stages
+    assert ProcessingStage.EXTRACTING_AUDIO in obs.stages
+    assert ProcessingStage.LOADING_MODEL in obs.stages
+    assert ProcessingStage.DENOISING in obs.stages
+    assert ProcessingStage.MUXING_VIDEO in obs.stages
+    # Real media info captured from the probe.
+    assert obs.media and obs.media[0].media_type.value == "video"
+    # FFmpeg progress reported for extract + mux (genuine numeric).
+    assert obs.progress and all(t > 0 for _, t in obs.progress)
+    codes = {c for c, _ in obs.activities}
+    assert ActivityCode.MODEL_READY in codes
+    assert ActivityCode.FFMPEG_PROGRESS in codes
 
 
 def test_happy_path_extract_enhance_mux_and_cleanup(tmp_path: Path) -> None:
