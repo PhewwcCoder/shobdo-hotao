@@ -59,7 +59,7 @@ def build_stylesheet(*, reduce_transparency: bool = False) -> str:
     bg = "#0E1621"
     surface = "#16212E" if not reduce_transparency else "#1B2735"
     text = "#EAF2F8"
-    muted = "#9FB0BE"
+    muted = "#BCCAD6"  # a touch brighter so captions (e.g. "Supported: …") read better
     field = "#1B2735"
     border = "#33465A"
     return f"""
@@ -103,6 +103,8 @@ def build_stylesheet(*, reduce_transparency: bool = False) -> str:
         font-weight: 600;
     }}
     QLabel#Muted {{ color: {muted}; }}
+    /* Small author credit, bottom-right of the home screen. */
+    QLabel#Credit {{ color: rgba(223, 236, 247, 0.62); font-size: 12px; }}
     QLabel#ValidationHint {{ color: #FF8A80; }}
     QLineEdit {{
         background: {field};

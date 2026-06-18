@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from ...domain import MediaInfo, MediaType
 from ...i18n import Translator
 from ..widgets.aero_background import AeroBackground, background_asset
+from ..widgets.cleaning_spinner import CleaningSpinner
 from ..widgets.glass_button import GlassButton
 from ..widgets.media_card import MediaCard
 from ..widgets.signal_visualizer import SignalVisualizer, VisualizerState
@@ -28,6 +29,7 @@ from ..widgets.strength_selector import StrengthSelector
 
 # Full-bleed background imagery. Drop your exported design(s) named
 # background_1.* / background_2.* / background_3.* into ui/theme/assets/backgrounds/.
+_CREDIT = "Created by Aryan Ahmad Sharar · BRAC University"
 
 
 class HomeView(QWidget):
@@ -57,6 +59,14 @@ class HomeView(QWidget):
         self._stack = QStackedLayout(self)
         self._stack.addWidget(self._build_empty())
         self._stack.addWidget(self._build_selected())
+
+        # Author credit, pinned bottom-right (positioned in resizeEvent).
+        self._credit = QLabel(_CREDIT, self)
+        self._credit.setObjectName("Credit")
+        self._credit.adjustSize()
+        # Busy overlay shown while a dropped/opened file is being probed.
+        self._spinner = CleaningSpinner(self)
+
         self.show_empty()
         self.retranslate(translator)
 
@@ -148,9 +158,18 @@ class HomeView(QWidget):
         """Reflect the persisted strength preset in the picker (no signal)."""
         self._strength.set_value(strength)
 
+    def show_loading(self) -> None:
+        """Show the cleaning-spinner busy overlay (e.g. while probing a file)."""
+        self._spinner.setGeometry(0, 0, self.width(), self.height())
+        self._spinner.start()
+
+    def hide_loading(self) -> None:
+        self._spinner.stop()
+
     def set_reduce_motion(self, value: bool) -> None:
         self._orb.set_reduce_motion(value)
         self._background.set_reduce_motion(value)
+        self._spinner.set_reduce_motion(value)
         self._strength.set_motion_enabled(not value)
         for btn in (self._open_btn, self._library_btn,
                     self._clean_btn, self._replace_btn):
@@ -160,6 +179,12 @@ class HomeView(QWidget):
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         self._background.setGeometry(0, 0, self.width(), self.height())
         self._background.lower()
+        self._spinner.setGeometry(0, 0, self.width(), self.height())
+        # Pin the credit to the bottom-right corner.
+        self._credit.adjustSize()
+        self._credit.move(self.width() - self._credit.width() - 16,
+                          self.height() - self._credit.height() - 10)
+        self._credit.raise_()
         super().resizeEvent(event)
 
     # --- i18n -------------------------------------------------------
@@ -179,6 +204,7 @@ class HomeView(QWidget):
         self._supported.setText(t("home.supported"))
         self._replace_btn.setText(t("home.replace_file"))
         self._strength.retranslate(translator)
+        self._spinner.set_caption(t("home.reading_file"))
         self._card.retranslate(translator)
         self._update_clean_label()
 

@@ -25,6 +25,21 @@ def _t() -> Translator:
     return Translator(Language.EN)
 
 
+def _wait_until(predicate, timeout_s: float = 5.0) -> bool:
+    """Pump the Qt event loop until ``predicate()`` is true (for async probes)."""
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
 def _audio_info() -> MediaInfo:
     return MediaInfo(Path("speech.mp3"), MediaType.AUDIO, "mp3", 2048, 9.0, 44100, 2)
 
@@ -167,8 +182,8 @@ def test_shell_select_file_shows_selected(shell, monkeypatch, tmp_path) -> None:
         media_probe, "probe",
         lambda p: AudioMetadata(p, 10.0, 44100, 2, 1, "mp3"),
     )
-    shell._select_file(src)
-    assert shell._home.is_selected() is True
+    shell._select_file(src)  # probes on a worker thread
+    assert _wait_until(lambda: shell._home.is_selected())
     assert shell._stack.currentWidget() is shell._home
 
 
@@ -199,8 +214,8 @@ def test_shell_home_button_resets_after_file_selected(
         media_probe, "probe",
         lambda p: AudioMetadata(p, 5.0, 44100, 2, 1, "mp3"),
     )
-    shell._select_file(src)
-    assert shell._home.is_selected() is True
+    shell._select_file(src)  # probes on a worker thread
+    assert _wait_until(lambda: shell._home.is_selected())
     shell._go_home()  # header Home button
     assert shell._home.is_selected() is False
     assert shell._stack.currentWidget() is shell._home

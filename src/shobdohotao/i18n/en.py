@@ -126,6 +126,7 @@ STRINGS: dict[str, str] = {
     "home.drop": "Drop audio or video here",
     "home.or_choose": "or choose a file",
     "home.supported": "Supported: MP3, WAV, M4A, FLAC · MP4, MOV, MKV, AVI, WebM",
+    "home.reading_file": "Reading file…",
     "home.replace_file": "Replace File",
     "media.format": "Format",
     "media.size": "Size",

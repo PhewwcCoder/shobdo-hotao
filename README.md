@@ -12,6 +12,17 @@ is cleaned and remuxed back. See [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md).
 
 ---
 
+## ⬇️ Download & install (Windows)
+
+No Python, account, or setup needed — just download and run:
+
+1. Open the [**Releases**](https://github.com/PhewwcCoder/shobdo-hotao/releases) page and download the latest **`ShobdoHotao-Setup.exe`**.
+2. Run it. Windows may warn **"Windows protected your PC"** (the app isn't code-signed) — click **More info → Run anyway**. This is normal and safe.
+3. Click through the installer; it adds a **desktop shortcut**.
+4. Launch **ShobdoHotao**. On the **first run only**, it downloads the AI model (~80 MB) once — after that it works **fully offline**. Your audio never leaves your computer.
+
+---
+
 ## Privacy first
 
 - Audio **never leaves your computer**. No login, API key, cloud, telemetry, ads, or quota.

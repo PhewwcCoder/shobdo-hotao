@@ -83,6 +83,9 @@ def _build_main_window_class() -> Any:
             self._active_duration: float | None = None
             self._thread: Any = None
             self._worker: Any = None
+            self._probe_thread: Any = None
+            self._probe_worker: Any = None
+            self._pending_path: Path | None = None
 
             self.setWindowTitle(self._t.tr("app.title"))
             self.setMinimumSize(900, 620)
@@ -184,28 +187,43 @@ def _build_main_window_class() -> Any:
             return path.suffix.lstrip(".").lower() in SUPPORTED_VIDEO_CONTAINERS
 
         def _select_file(self, path: Path) -> None:
-            try:
-                if self._is_video(path):
-                    from ..media.probe import probe_video
+            # Probe off the UI thread so the home screen can animate its
+            # cleaning-spinner instead of freezing while ffprobe runs.
+            if self._probe_thread is not None:
+                return  # a probe is already in flight
+            from ..workers.probe_worker import make_probe_worker
 
-                    meta = probe_video(path)
-                    self._video_meta = meta
-                    info = MediaInfo.from_video(meta)
-                else:
-                    from ..services import media_probe
+            self._pending_path = path
+            self._stack.setCurrentWidget(self._home)
+            self._home.show_loading()
+            worker = make_probe_worker(path, self._is_video(path))
+            worker.done.connect(self._on_probe_done)
+            worker.failed.connect(self._on_probe_failed)
+            worker.done.connect(self._teardown_probe_thread)
+            worker.failed.connect(self._teardown_probe_thread)
+            self._probe_worker = worker
+            self._probe_thread = run_worker_on_thread(worker)
 
-                    meta = media_probe.probe(path)
-                    self._video_meta = None
-                    info = MediaInfo.from_audio(meta)
-            except ProcessingError as exc:
-                self._error_box(self._t.tr(f"error.{exc.code.value}"))
-                return
-            self._input_path = path
+        def _on_probe_done(self, info: MediaInfo, video_meta: Any) -> None:
+            self._home.hide_loading()
+            self._video_meta = video_meta
+            self._input_path = self._pending_path
             self._media_info = info
             self._active_media_type = info.media_type
             self._active_duration = info.duration_seconds or None
             self._home.show_selected(info)
             self._stack.setCurrentWidget(self._home)
+
+        def _on_probe_failed(self, exc: ProcessingError) -> None:
+            self._home.hide_loading()
+            self._error_box(self._t.tr(f"error.{exc.code.value}"))
+
+        def _teardown_probe_thread(self, *_args: Any) -> None:
+            if self._probe_thread is not None:
+                self._probe_thread.quit()
+                self._probe_thread.wait()
+            self._probe_thread = None
+            self._probe_worker = None
 
         # --- job start -------------------------------------------------
         def _staging_dir(self) -> Path:
