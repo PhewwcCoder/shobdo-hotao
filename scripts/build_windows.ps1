@@ -14,6 +14,10 @@ $pyArgs = @(
     "--noconfirm",
     "--name", "ShobdoHotao",
     "--windowed",
+    # Find the package under src/ and bundle ALL its submodules (the app uses
+    # lazy/function-level imports that static analysis can otherwise miss).
+    "--paths", "src",
+    "--collect-submodules", "shobdohotao",
     # DeepFilterNet ships its runtime pieces as package data + a native lib.
     "--collect-all", "df",
     # Bundled UI artwork (backgrounds, etc.).
@@ -24,7 +28,9 @@ $pyArgs = @(
 if (Test-Path "assets\app.ico") {
     $pyArgs += @("--icon", "assets\app.ico")
 }
-$pyArgs += "src/shobdohotao/__main__.py"
+# Entry is the package-aware launcher (main.py), NOT __main__.py directly:
+# running __main__.py as a script breaks its relative imports.
+$pyArgs += "main.py"
 
 & $venvPy @pyArgs
 

@@ -27,6 +27,7 @@ dev = [
     "pytest>=8",
     "ruff>=0.5",
     "pyinstaller>=6",
+    "pillow>=10",  # scripts/make_icon.py packs the multi-size app.ico
 ]
 
 [project.scripts]
