@@ -33,12 +33,14 @@ class FakeBackend:
         self.calls = 0
 
     def enhance(self, wav_in: Path, wav_out: Path, strength: Strength,
-                on_stage=None) -> None:
+                on_stage=None, on_progress=None, cancelled=None) -> None:
         self.calls += 1
         if on_stage is not None:
             from shobdohotao.domain import ProcessingStage
             on_stage(ProcessingStage.LOADING_MODEL)
             on_stage(ProcessingStage.DENOISING)
+        if on_progress is not None:
+            on_progress(1, 1)
         if self.fail:
             raise ProcessingError(ErrorCode.ENHANCE_FAILED, "fake fail")
         wav_out.write_bytes(b"RIFFfake")  # produce a real enhanced wav

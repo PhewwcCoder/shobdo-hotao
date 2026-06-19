@@ -164,11 +164,15 @@ class Pipeline:
             )
             self._check_cancelled(cancelled)
 
-            # 4. Enhance (the backend splits LOADING_MODEL -> DENOISING).
+            # 4. Enhance (the backend splits LOADING_MODEL -> DENOISING). Chunked
+            # internally so memory stays bounded on long files; reports real
+            # progress and is cancellable between chunks.
             progress(JobState.ENHANCING, 0.4)
             self._backend.enhance(
                 wav_in, wav_out, request.strength,
                 on_stage=_make_enhance_stage_cb(obs),
+                on_progress=obs.on_progress,
+                cancelled=cancelled,
             )
             if not wav_out.exists():
                 raise ProcessingError(ErrorCode.ENHANCE_FAILED, "no enhanced wav")

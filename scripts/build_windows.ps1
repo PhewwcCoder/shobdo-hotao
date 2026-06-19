@@ -20,6 +20,8 @@ $pyArgs = @(
     "--collect-submodules", "shobdohotao",
     # DeepFilterNet ships its runtime pieces as package data + a native lib.
     "--collect-all", "df",
+    # soundfile (+ its libsndfile DLL) is used directly for chunked WAV I/O.
+    "--collect-all", "soundfile",
     # Bundled UI artwork (backgrounds, etc.).
     "--add-data", "src/shobdohotao/ui/theme/assets;shobdohotao/ui/theme/assets",
     # Pre-fetched model weights, when present (otherwise fetched on first run).

@@ -24,6 +24,19 @@ installer/Output/
 models/*
 !models/.gitkeep
 
+# Test/sample media dropped in the repo root (never commit large recordings)
+/*.mp3
+/*.wav
+/*.m4a
+/*.aac
+/*.flac
+/*.ogg
+/*.mp4
+/*.mov
+/*.mkv
+/*.avi
+/*.webm
+
 # OS / editor
 Thumbs.db
 .DS_Store

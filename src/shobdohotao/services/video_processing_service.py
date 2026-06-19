@@ -165,11 +165,13 @@ class VideoProcessingService:
                 on_progress=_make_progress_cb(obs),
             )
 
-            # 5. Enhance via the shared DeepFilterNet backend.
+            # 5. Enhance via the shared DeepFilterNet backend (chunked; bounded
+            # memory + real progress on long audio tracks).
             progress(JobState.ENHANCING, 0.4)
             self._backend.enhance(
                 wav_in, wav_out, request.strength,
                 on_stage=_make_enhance_stage_cb(obs),
+                on_progress=obs.on_progress,
             )
             if not wav_out.exists():
                 raise ProcessingError(ErrorCode.ENHANCE_FAILED, "no enhanced wav")

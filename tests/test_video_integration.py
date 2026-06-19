@@ -50,7 +50,7 @@ class CopyBackend:
     """Stand-in for DeepFilterNet: copies input WAV to output WAV."""
 
     def enhance(self, wav_in: Path, wav_out: Path, strength: Strength,
-                on_stage=None) -> None:
+                on_stage=None, on_progress=None, cancelled=None) -> None:
         shutil.copyfile(wav_in, wav_out)
 
 

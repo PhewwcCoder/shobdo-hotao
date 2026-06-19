@@ -33,7 +33,7 @@ class FakeBackend:
         self.fail = fail
 
     def enhance(self, wav_in: Path, wav_out: Path, strength: Strength,
-                on_stage=None) -> None:
+                on_stage=None, on_progress=None, cancelled=None) -> None:
         if on_stage is not None:
             on_stage(ProcessingStage.LOADING_MODEL)
             on_stage(ProcessingStage.DENOISING)
